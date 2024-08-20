@@ -1,0 +1,30 @@
+{
+    "algorithm": "BFV",
+    "key": {
+        "rlk": -1,
+        "glk": {
+            "64": 1
+        }
+    },
+    "online": [
+        {
+            "id": "ac",
+            "type": "ct",
+            "size": [
+                500
+            ],
+            "level": 1,
+            "phase": "in"
+        },
+        {
+            "id": "y",
+            "type": "ct",
+            "size": [
+                500
+            ],
+            "level": 1,
+            "phase": "out"
+        }
+    ],
+    "offline": []
+}
