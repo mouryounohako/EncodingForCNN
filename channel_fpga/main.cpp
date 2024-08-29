@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
                       prime_mod, N);
   }
 
-  int Ci = 128; int Co = 128; int H = 28; int W = 28; int p = 1; int s = 1; int k = 3; int Ho = 28; int Wo = 28;
+  int Ci = 8; int Co = 8; int H = 28; int W = 28; int p = 1; int s = 1; int k = 3; int Ho = 28; int Wo = 28;
   Tensor<uint64_t> input(TensorShape(3, {Ci, H, W})); 
   Tensor<uint64_t> weight(TensorShape(4, {Co, Ci, k, k}));
   for (int i = 0; i < Co * Ci * k * k; i++){
@@ -88,8 +88,8 @@ int main(int argc, char **argv) {
       input.cached_data[i] = 1;
     }
   }
-  Conv2dNest<uint64_t> conv2d_nest(weight, Co, Ci, H, W, k, s, p, info, std::move(param));
-  Tensor<uint64_t> output = conv2d_nest.forward(input);
+  Conv2dChan<uint64_t> conv2d_chan(weight, Co, Ci, H, W, k, s, p, info, std::move(param));
+  Tensor<uint64_t> output = conv2d_chan.forward(input);
   SSreconstruct<uint64_t>(output, party, prime_mod);
   for (int i = 0; i < Co; i++){
     std::cout << i << std::endl;

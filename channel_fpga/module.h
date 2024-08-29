@@ -453,8 +453,8 @@ template <typename Data>
 class Conv2dChan : public Module<Data> {
  public:
   Tensor<Data> weight;
-  int Co, Ci, c_o, c_i, C, Hi, Wi, H, W, k, s, p, Ho, Wo;
-  std::vector<BfvPlaintextRingt> weight_pt;
+  int Co, Ci, c_o, c_i, C, Hi, Wi, H, W, k, s, p, Ho, Wo, perm[8192];
+  std::vector<BfvPlaintextMul> weight_pt;
   CryptoInfo ct_info;
   BfvParameter param;
 
@@ -477,59 +477,29 @@ class Conv2dChan : public Module<Data> {
     W = Wi + 2 * p;
     Ho = (H - k) / s + 1;
     Wo = (W - k) / s + 1;
-    C = ct_info.N / (2 * H * W);
+    C = ct_info.N / (H * W);
+    C--;
+    for (int i = 0; i < 5; i++) {
+      C |= C >> (1 << i);
+    }
+    C++;
+    C /= 2;
     c_i = Ci / C + (Ci % C != 0);
     c_o = Co / C + (Co % C != 0);
 
-    uint64_t modulus = ct_info.prime_mod;
-    size_t degree = H * W;
-    intel::hexl::NTT ntt(degree, modulus);
-
-    Tensor<Data> weight1(TensorShape(4, {k, k, Ci, Co}));
-    Tensor<Data> weight2(TensorShape(4, {k, k, Ci, Co}));
-    for (int i = 0; i < k; i++){
-      for (int j = 0; j < k; j++){
-        for (int m = 0; m < Ci; m++){
-          for (int n = 0; n < Co; n++){
-            weight1.cached_data[m * k * k * Co + n * k * k + i * k + j] = weight.cached_data[n * k * k * Ci + m * k * k + i * k + j];
-            weight2.cached_data[m * k * k * Co + n * k * k + i * k + j] = weight.cached_data[(n + Co) * k * k * Ci + m * k * k + i * k + j]; // to be confirmed
-          }
-        }
-      }
-    }
-
     if (party == sci::ALICE){
-      int inrot = std::sqrt(C);
-      if (inrot != std::floor(inrot)){
-        inrot *= std::sqrt(2);
-      }
-      int os = (k - 1) * (W + 1);
+      int ofs = (k * W + k - W) * C - 1;
       for (int i = 0; i < c_i; i++){
-        for (int j = 0; j < c_o; j++){
-          for (int l = 0; l < C; l++){
-            std::vector<uint64_t> w_msg(ct_info.N, 0);
-            for (int m = 0; m < C; m++){
-              int ci = i * C + (m + (inrot - 1 - l % inrot)) % C;
-              int co = j * C + (3 * C - m - l - (inrot - 1 - l % inrot) - 1) % C;
-              if (ci < Ci && co < Co){
-                for (int n = 0; n < k * k; n++){
-                  w_msg[m * H * W + os - (n / k) * W - (n % k)] = weight1.cached_data[ci * k * k * Co + co * k * k + n];
-                  w_msg[(m + C) * H * W + os - (n / k) * W - (n % k)] = weight2.cached_data[ci * k * k * Co + co * k * k + n]; 
-                }
+        for (int j = 0; j < Co; j++){
+          std::vector<uint64_t> w_msg(ct_info.N, 0);
+          for (int m = 0; m < C; m++){
+            if (i * C + m < Ci){
+              for (int n = 0; n < k * k; n++){
+                w_msg[ofs - ((n / k) * W * C + (n % k) * C + m)] = weight.cached_data[Ci * k * k * j + (i * C + m) * k * k + n];
               }
             }
-            for (int m = 0; m < 2 * C; m++){ // somewhat hideous and redundant, but it works
-              std::vector<uint64_t> tmp(H * W, 0);
-              for (int n = 0; n < H * W; n++){
-                tmp[n] = w_msg[m * H * W + n];
-              }
-              ntt.ComputeForward(tmp.data(), tmp.data(), 1, 1);
-              for (int n = 0; n < H * W; n++){
-                w_msg[m * H * W + n] = tmp[n];
-              }
-            }
-            weight_pt.push_back(ct_info.context_p->encode_ringt(w_msg));
           }
+          weight_pt.push_back(ct_info.context_p->encode_coeffs_mul(w_msg, ct_info.level));
         }
       }
     }
@@ -537,9 +507,6 @@ class Conv2dChan : public Module<Data> {
     
   vector<vector<Data>> pack_ac(Tensor<Data>& act) {
     std::vector<vector<Data>> packed_ac;
-    uint64_t modulus = ct_info.prime_mod;
-    size_t degree = H * W;
-    intel::hexl::NTT ntt(degree, modulus);
 
     for (int i = 0; i < c_i; i++){
       std::vector<uint64_t> ac_msg(ct_info.N, 0);
@@ -548,22 +515,10 @@ class Conv2dChan : public Module<Data> {
           for (int m = 0; m < H; m++){
             for (int n = 0; n < W; n++){
               if (m >= p && m < p + Hi && n >= p && n < p + Wi){
-                ac_msg[j * H * W + m * W + n] = act.cached_data[(i * C + j) * Hi * Wi + (m - p) * Wi + (n - p)];
-                ac_msg[(j + C) * H * W + m * W + n] = act.cached_data[(i * C + j) * Hi * Wi + (m - p) * Wi + (n - p)];
+                ac_msg[C * (m * W + n) + j] = act.cached_data[(i * C + j) * Hi * Wi + (m - p) * Wi + (n - p)];
               }
             }
           }
-        }
-      }
-
-      for (int m = 0; m < 2 * C; m++){
-        std::vector<uint64_t> tmp(H * W, 0);
-        for (int n = 0; n < H * W; n++){
-          tmp[n] = ac_msg[m * H * W + n];
-        }
-        ntt.ComputeForward(tmp.data(), tmp.data(), 1, 1);
-        for (int n = 0; n < H * W; n++){
-          ac_msg[m * H * W + n] = tmp[n];
         }
       }
       packed_ac.push_back(ac_msg);
@@ -573,35 +528,12 @@ class Conv2dChan : public Module<Data> {
   };
 
   Tensor<Data> depack_res(vector<vector<Data>>& out_msg) {
-    uint64_t modulus = ct_info.prime_mod;
-    size_t degree = H * W;
-    intel::hexl::NTT ntt(degree, modulus);
-
-    for (int i = 0; i < c_o; i++){
-      for (int m = 0; m < 2 * C; m++){
-        std::vector<uint64_t> tmp(H * W, 0);
-        for (int n = 0; n < H * W; n++){
-          tmp[n] = out_msg[i][m * H * W + n];
-        }
-        ntt.ComputeInverse(tmp.data(), tmp.data(), 1, 1);
-        for (int n = 0; n < H * W; n++){
-          out_msg[i][m * H * W + n] = tmp[n];
-        }
-      } 
-    }
-
-    Co *= 2;
     Tensor<Data> out(TensorShape(3, {Co, Ho, Wo}));
     for (int i = 0; i < Co; i++){
       for (int j = 0; j < Ho; j++){
         for (int l = 0; l < Wo; l++){
-          int index = s * j * W + s * l + (k - 1) * (W + 1);
-          if (i < Co / 2){
-            out.cached_data[i * Ho * Wo + j * Wo + l] = out_msg[i / C][((C * Co - i) % C) * H * W + index];
-          }
-          else{
-            out.cached_data[i * Ho * Wo + j * Wo + l] = out_msg[(i - Co / 2) / C][(C + (C * Co - i + Co / 2) % C) * H * W + index];
-          }
+          int ofs = (k * W + k - W) * C - 1;
+          out.cached_data[i * Ho * Wo + j * Wo + l] = out_msg[i][ofs + C * s * (j * W + l)];
         }
       }
     }
@@ -622,11 +554,10 @@ class Conv2dChan : public Module<Data> {
     vector<BfvPlaintext> out_share;
     vector<vector<Data>> out_msg;
 
-    Co /= 2;
     if (party == sci::ALICE){
       ac_msg = pack_ac(input);
       for (int i = 0; i < ac_msg.size(); i++) {
-        ac_pt.push_back(ct_info.context_p->encode(ac_msg[i], ct_info.level));
+        ac_pt.push_back(ct_info.context_p->encode_coeffs(ac_msg[i], ct_info.level));
       }
       for (int i = 0; i < ac_msg.size(); i++) {
         vector<uint8_t> buffer(ct_info.cipher_size, 0);
@@ -641,7 +572,7 @@ class Conv2dChan : public Module<Data> {
     else{
       ac_msg = pack_ac(input);
       for (int i = 0; i < ac_msg.size(); i++) {
-        ac_ct.push_back(ct_info.context_p->encrypt_asymmetric(ct_info.context_p->encode(ac_msg[i], ct_info.level)));
+        ac_ct.push_back(ct_info.context_p->encrypt_asymmetric(ct_info.context_p->encode_coeffs(ac_msg[i], ct_info.level)));
       }
       for (int i = 0; i < ac_msg.size(); i++) {
         io->send_data(static_cast<void*>(ac_ct[i].serialize(param).data()), ct_info.cipher_size);
@@ -651,14 +582,16 @@ class Conv2dChan : public Module<Data> {
     auto temp1 = TIMER_TILL_NOW;
 #endif
     if (party == sci::ALICE){
-      for (int i = 0; i < c_o; i++){
-        out_ct.push_back(std::move(ct_info.context_p->new_ciphertext(1, ct_info.level)));
+      for (int i = 0; i < c_i; i++) {
+        for (int j = 0; j < Co; j++) {
+          out_ct.push_back(ct_info.context_p->mult_plain_mul(ac_ct[i], weight_pt[i * Co + j]));
+        }
       }
-      // std::cout << "parameters: " << d0 << " " << d1 << " " << d2 << " " << t < " " << input_rot << std::endl;
-      FpgaDevice::init();
-      FpgaProject fpga_project("../../neujeans_fpga/neujeans0");
-      vector<CxxVectorArgument> cxx_args = {{"w", &weight_pt}, {"ac", &ac_ct}, {"y", &out_ct} };
-      fpga_project.run(ct_info.context_p, cxx_args, true);
+      for (int i = 1; i < c_i; i++) {
+        for (int j = 0; j < Co; j++) {
+          ct_info.context_p->add_inplace(out_ct[j], out_ct[i * Co + j]);
+        }
+      }
     }
 #ifdef LOG_LAYERWISE
     auto temp2 = TIMER_TILL_NOW;
@@ -668,22 +601,22 @@ class Conv2dChan : public Module<Data> {
     std::mt19937_64 gen(rd());
     std::uniform_int_distribution<uint64_t> distrib(0, ct_info.prime_mod - 1);
     if (party == sci::ALICE){
-      for (int i = 0; i < c_o; i++){
+      for (int i = 0; i < Co; i++){
         vector<uint64_t> pos_mask(ct_info.N, 0);
         vector<uint64_t> neg_mask(ct_info.N, 0);
         for(int j = 0; j < pos_mask.size(); j++) {
           pos_mask[j] = distrib(gen);
           neg_mask[j] = ct_info.prime_mod - pos_mask[j];
         }
-        BfvPlaintext temp_buffer_pos = ct_info.context_p->encode(pos_mask, ct_info.level);
-        BfvPlaintext temp_buffer_neg = ct_info.context_p->encode(neg_mask, ct_info.level);
+        BfvPlaintext temp_buffer_pos = ct_info.context_p->encode_coeffs(pos_mask, ct_info.level);
+        BfvPlaintext temp_buffer_neg = ct_info.context_p->encode_coeffs(neg_mask, ct_info.level);
         ct_info.context_p->add_plain_inplace(out_ct[i], temp_buffer_neg);
         out_share.push_back(move(temp_buffer_pos));
         io->send_data(static_cast<void*>(out_ct[i].serialize(param).data()), ct_info.cipher_size);
       }
     }
     else {
-      for(int i = 0; i < c_o; i++) {
+      for(int i = 0; i < Co; i++) {
         vector<uint8_t> buffer(ct_info.cipher_size, 0);
         io->recv_data(static_cast<void*>(buffer.data()), ct_info.cipher_size);
         BfvCiphertext ct_buffer = BfvCiphertext::deserialize(&buffer);
@@ -692,13 +625,13 @@ class Conv2dChan : public Module<Data> {
     }
 
     if(party == sci::ALICE) {
-      for(int i = 0; i < c_o; i++) {
-        vector<uint64_t> res = ct_info.context_p->decode(out_share[i]);
+      for(int i = 0; i < Co; i++) {
+        vector<uint64_t> res = ct_info.context_p->decode_coeffs(out_share[i]);
         out_msg.push_back(res);
       }
     } else {
-      for(int i = 0; i < c_o; i++) {
-        vector<uint64_t> res = ct_info.context_p->decode(ct_info.context_p->decrypt(out_ct[i]));
+      for(int i = 0; i < Co; i++) {
+        vector<uint64_t> res = ct_info.context_p->decode_coeffs(ct_info.context_p->decrypt(out_ct[i]));
         out_msg.push_back(res);
       }
     }
