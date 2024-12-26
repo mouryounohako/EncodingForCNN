@@ -72,34 +72,34 @@ int main(int argc, char **argv) {
                       prime_mod, N);
   }
 
-  int Ci = 8; int Co = 8; int H = 28; int W = 28; int p = 1; int s = 1; int k = 3; int Ho = 28; int Wo = 28;
+  int Ci = 1024; int Co = 64; int H = 16; int W = 32; int p = 0; int s = 1; int k = 1; int Ho = 9; int Wo = 9; int C = 64;
   Tensor<uint64_t> input(TensorShape(3, {Ci, H, W})); 
   Tensor<uint64_t> weight(TensorShape(4, {Co, Ci, k, k}));
-  for (int i = 0; i < Co * Ci * k * k; i++){
-    weight.cached_data[i] = i / (Ci * k * k);
-  }
-  if (party == sci::ALICE){
-    for (int i = 0; i < Ci * H * W ; i++){
-      input.cached_data[i] = 0;
-    }
-  }
-  else{
-    for (int i = 0; i < Ci * H * W; i++){
-      input.cached_data[i] = 1;
-    }
-  }
+  // for (int i = 0; i < Co * Ci * k * k; i++){
+  //   weight.cached_data[i] = i / (Ci * k * k);
+  // }
+  // if (party == sci::ALICE){
+  //   for (int i = 0; i < Ci * H * W ; i++){
+  //     input.cached_data[i] = 0;
+  //   }
+  // }
+  // else{
+  //   for (int i = 0; i < Ci * H * W; i++){
+  //     input.cached_data[i] = 1;
+  //   }
+  // }
   Conv2dChan<uint64_t> conv2d_chan(weight, Co, Ci, H, W, k, s, p, info, std::move(param));
   Tensor<uint64_t> output = conv2d_chan.forward(input);
   SSreconstruct<uint64_t>(output, party, prime_mod);
-  for (int i = 0; i < Co; i++){
-    std::cout << i << std::endl;
-    for (int j = 0; j < Ho; j++){
-      for (int l = 0; l < Wo; l++){
-        std::cout << output.cached_data[i * Ho * Wo + j * Wo + l] << " ";
-      }
-      std::cout << std::endl;
-    }
-  }
+  // for (int i = 0; i < Co; i++){
+  //   std::cout << i << std::endl;
+  //   for (int j = 0; j < Ho; j++){
+  //     for (int l = 0; l < Wo; l++){
+  //       std::cout << (output.cached_data[i * Ho * Wo + j * Wo + l] + C / 2) / C << " ";
+  //     }
+  //     std::cout << std::endl;
+  //   }
+  // }
  
   EndComputation();
 }

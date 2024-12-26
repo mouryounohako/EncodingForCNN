@@ -1,0 +1,53 @@
+{
+    "algorithm": "BFV",
+    "key": {
+        "rlk": -1,
+        "glk": {
+            "1024": 1,
+            "512": 1,
+            "256": 1,
+            "128": 1,
+            "64": 1,
+            "2048": 1
+        }
+    },
+    "online": [
+        {
+            "id": "w",
+            "type": "pt_ringt",
+            "size": [
+                4096
+            ],
+            "level": 0,
+            "phase": "in"
+        },
+        {
+            "id": "ac",
+            "type": "ct",
+            "size": [
+                8
+            ],
+            "level": 1,
+            "phase": "in"
+        },
+        {
+            "id": "r",
+            "type": "pt_ringt",
+            "size": [
+                6
+            ],
+            "level": 0,
+            "phase": "in"
+        },
+        {
+            "id": "y",
+            "type": "ct",
+            "size": [
+                8
+            ],
+            "level": 1,
+            "phase": "out"
+        }
+    ],
+    "offline": []
+}

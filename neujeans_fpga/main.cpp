@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
                       prime_mod, N);
   }
 
-  int Ci = 64; int Co = 64; int H = 56; int W = 56; int p = 1; int s = 1; int k = 3; int Ho = 56; int Wo = 56;
+  int Ci = 128; int Co = 128; int H = 28; int W = 28; int p = 1; int s = 1; int k = 3; int Ho = 28; int Wo = 28;
   Tensor<uint64_t> input(TensorShape(3, {Ci, H, W})); 
   Tensor<uint64_t> weight(TensorShape(4, {Co, Ci, k, k}));
   for (int i = 0; i < Co * Ci * k * k; i++){

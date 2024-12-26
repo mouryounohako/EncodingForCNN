@@ -8,6 +8,7 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <chrono>
 
 #include "module.h"
 #include "tensor.h"
@@ -69,39 +70,39 @@ int main(int argc, char **argv) {
     info = CryptoInfo(party, context_p, level, ciphersize,
                       prime_mod, N);
   }
-  int d0 = 128; int d1 = 768; int d2 = 128;
+  int d0 = 64; int d1 = 1024; int d2 = 512;
   Tensor<uint64_t> input(TensorShape(2, {d0, d1})); 
   Tensor<uint64_t> weight(TensorShape(2, {d1, d2}));
-  Tensor<uint64_t> output_ans(TensorShape(2, {d0, d2}));
-  std::vector<uint64_t> tmp(d0 * d2, 0); 
-  output_ans.cached_data = tmp;
-  for (int i = 0; i < d2 * d1; i++){
-    weight.cached_data[i] = 1;
-  }
-  if (party == sci::ALICE){
-    for (int i = 0; i < d1 * d0; i++){
-      input.cached_data[i] = 0;
-    }
-  }
-  else{
-    for (int i = 0; i < d1 * d0; i++){
-      input.cached_data[i] = i;
-    }
-  }
-  for (int i = 0; i < d0; i++){
-    for (int j = 0; j < d1; j++){
-      for (int k = 0; k < d2; k++){
-        output_ans.cached_data[i * d2 + k] += input.cached_data[i * d1 + j] * weight.cached_data[j * d2 + k];
-      }
-    }
-  }
-  for (int i = 0; i < output_ans.size(); i++){
-    output_ans.cached_data[i] = output_ans.cached_data[i] % prime_mod;
-  }
+  // Tensor<uint64_t> output_ans(TensorShape(2, {d0, d2}));
+  // std::vector<uint64_t> tmp(d0 * d2, 0); 
+  // output_ans.cached_data = tmp;
+  // for (int i = 0; i < d2 * d1; i++){
+  //   weight.cached_data[i] = 1;
+  // }
+  // if (party == sci::ALICE){
+  //   for (int i = 0; i < d1 * d0; i++){
+  //     input.cached_data[i] = 0;
+  //   }
+  // }
+  // else{
+  //   for (int i = 0; i < d1 * d0; i++){
+  //     input.cached_data[i] = i;
+  //   }
+  // }
+  // for (int i = 0; i < d0; i++){
+  //   for (int j = 0; j < d1; j++){
+  //     for (int k = 0; k < d2; k++){
+  //       output_ans.cached_data[i * d2 + k] += input.cached_data[i * d1 + j] * weight.cached_data[j * d2 + k];
+  //     }
+  //   }
+  // }
+  // for (int i = 0; i < output_ans.size(); i++){
+  //   output_ans.cached_data[i] = output_ans.cached_data[i] % prime_mod;
+  // }
   BoltMatmul<uint64_t> bolt_matmul(weight, d0, d1, d2, info, std::move(param));
   Tensor<uint64_t> output = bolt_matmul.forward(input);
   SSreconstruct<uint64_t>(output, party, prime_mod);
-  std::cout << "Parity: " << (output.cached_data == output_ans.cached_data) << std::endl;
+  // std::cout << "Parity: " << (output.cached_data == output_ans.cached_data) << std::endl;
 
   EndComputation();
 }

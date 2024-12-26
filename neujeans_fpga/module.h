@@ -454,7 +454,7 @@ class Conv2dNest : public Module<Data> {
  public:
   Tensor<Data> weight;
   int Co, Ci, c_o, c_i, C, Hi, Wi, H, W, k, s, p, Ho, Wo;
-  std::vector<BfvPlaintextMul> weight_pt;
+  std::vector<BfvPlaintextRingt> weight_pt;
   CryptoInfo ct_info;
   BfvParameter param;
 
@@ -538,7 +538,7 @@ class Conv2dNest : public Module<Data> {
                 w_msg[m * H * W + n] = tmp[n];
               }
             }
-            weight_pt.push_back(ct_info.context_p->encode_mul(w_msg, ct_info.level));
+            weight_pt.push_back(ct_info.context_p->encode_ringt(w_msg));
           }
         }
       }
@@ -666,7 +666,7 @@ class Conv2dNest : public Module<Data> {
       }
       // std::cout << "parameters: " << d0 << " " << d1 << " " << d2 << " " << t < " " << input_rot << std::endl;
       FpgaDevice::init();
-      FpgaProject fpga_project("../../neujeans_fpga/neujeans_0");
+      FpgaProject fpga_project("../../neujeans_fpga/neujeans0");
       vector<CxxVectorArgument> cxx_args = {{"w", &weight_pt}, {"ac", &ac_ct}, {"y", &out_ct} };
       fpga_project.run(ct_info.context_p, cxx_args, true);
     }

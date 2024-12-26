@@ -6,7 +6,7 @@ from custom_task import *
 
 def bolt_fpga():    
     level = 1
-    N, d0, d1, d2, t, inrot = 4096, 64, 768, 64, 32, 2  # d0 /= 2
+    N, d0, d1, d2, t, inrot = 4096, 64, 1024, 64, 64, 8  # d0 /= 2
     # inrot = pow(2, math.floor(0.5 * math.log2(d2 * t / d1)))
     # if (d1 * inrot + d2 * t / inrot > 2 * d1 * inrot + d2 * t / (2 * inrot)):
     #     inrot *= 2
@@ -20,7 +20,7 @@ def bolt_fpga():
         ac_rot.append(ac[i])
     for i in range(inrot - 1):
         for j in range(d1 // t):
-            ac_rot.append(rotate(ac_rot[i * (d1 // t) + j], d0, f"rot_{i}_{j}"))
+            ac_rot.append(rotate_cols(ac_rot[i * (d1 // t) + j], d0, f"rot_{i}_{j}")[0])
     int_tmp = []
     for i in range(len(w)):
         int_tmp.append(mult(ac_rot[(inrot - 1 - i % t % inrot) * d1 // t + i // d2], w[i], f"int_{i}"))
@@ -35,7 +35,7 @@ def bolt_fpga():
                 int_tmp[i * t + j - j % inrot] = add(int_tmp[i * t + j - j % inrot], int_tmp[i * t + j]) # may be merged if needed later
         y.append(int_tmp[i * t])
         for j in range(1, t // inrot):
-            y[i] = rotate(y[i], d0 * inrot)
+            y[i] = rotate_cols(y[i], d0 * inrot)[0]
             y[i] = add(y[i], int_tmp[i * t + j * inrot])
 
     process_custom_task(

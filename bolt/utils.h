@@ -45,7 +45,7 @@ BfvContext transfer_context(int party,
     io->recv_data(&ctx_size, 1 * sizeof(int));
     vector<uint8_t> ctx(ctx_size, 0);
     io->recv_data(static_cast<void*>(ctx.data()), ctx_size);
-    BfvContext ctx_buffer = (BfvContext::deserialize(&ctx));
+    BfvContext ctx_buffer = (BfvContext::deserialize(ctx));
     std::cout
         << "-----------Public Context Recved-----------"
         << std::endl;

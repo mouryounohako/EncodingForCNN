@@ -453,7 +453,8 @@ template <typename Data>
 class Conv2dChan : public Module<Data> {
  public:
   Tensor<Data> weight;
-  int Co, Ci, c_o, c_i, C, Hi, Wi, H, W, k, s, p, Ho, Wo, perm[8192];
+  int Co, Ci, c_o, c_i, C, Hi, Wi, H, W, k, s, p, Ho, Wo;
+  std::map<int, std::vector<int>> automap;
   std::vector<BfvPlaintextMul> weight_pt;
   CryptoInfo ct_info;
   BfvParameter param;
@@ -478,28 +479,74 @@ class Conv2dChan : public Module<Data> {
     Ho = (H - k) / s + 1;
     Wo = (W - k) / s + 1;
     C = ct_info.N / (H * W);
-    C--;
-    for (int i = 0; i < 5; i++) {
-      C |= C >> (1 << i);
+    int c = 1;
+    while (c <= C) {
+      c *= 2;
     }
-    C++;
-    C /= 2;
+    C = c / 2;
     c_i = Ci / C + (Ci % C != 0);
     c_o = Co / C + (Co % C != 0);
+    int inrot =  std::sqrt(C);
+    if (inrot * inrot != C) {
+      inrot = std::sqrt(2 * C);
+    }
+    std::cout << inrot << " " << C << std::endl;
+    automap = {{1, {2048}}, {2, {1024}}, {4, {512}}, {8, {256}}, {16, {128}}, {32, {64}}, {64, {32}}, {128, {16}}, {256, {8}}, {512, {4}}, {1024, {2}}, {2048, {1}}};
 
-    if (party == sci::ALICE){
+    int auto_step = 2 * ct_info.N / C + 1;
+    int perm[C][ct_info.N], perm_inv[C][ct_info.N], flip[C][ct_info.N];
+    for (int j = 0; j < ct_info.N; j++) {
+      perm[0][j] = j;
+      perm_inv[0][j] = j;
+      flip[0][j] = 0;
+    }
+    for (int i = 1; i < C; i++) {
+      for (int j = 0; j < ct_info.N; j++) {
+        perm[i][j] = (perm[i - 1][j] * auto_step) % ct_info.N;
+        perm_inv[i][perm[i][j]] = j;
+        flip[i][j] = (perm[i - 1][j] * auto_step / ct_info.N + flip[i - 1][j]) % 2;
+      }
+    }
+
+    if (party == sci::ALICE){ // w_{ijk} = auto_{k % inrot}(auto_{-k}(x ^ j) * w_{ij}) where i ~ i; j ~ q; k ~ p
       int ofs = (k * W + k - W) * C - 1;
       for (int i = 0; i < c_i; i++){
-        for (int j = 0; j < Co; j++){
-          std::vector<uint64_t> w_msg(ct_info.N, 0);
-          for (int m = 0; m < C; m++){
-            if (i * C + m < Ci){
-              for (int n = 0; n < k * k; n++){
-                w_msg[ofs - ((n / k) * W * C + (n % k) * C + m)] = weight.cached_data[Ci * k * k * j + (i * C + m) * k * k + n];
+        for (int j = 0; j < c_o; j++){
+          for (int p = 0; p < C; p++){ // dim_p = Auto
+            std::vector<uint64_t> w_msg(ct_info.N, 0);
+            std::vector<int64_t> s_w_msg(ct_info.N, 0);
+            for (int q = 0; q < C; q++){ // dim_q = Co
+              std::vector<int64_t> tmp_orig(ct_info.N, 0);
+              std::vector<int64_t> tmp_shift(ct_info.N, 0);
+              for (int m = 0; m < C; m++) { // dim_m = Ci
+                if (i * C + m < Ci && j * C + q < Co){
+                  for (int n = 0; n < k * k; n++){
+                    tmp_orig[ofs - ((n / k) * W * C + (n % k) * C + m)] = weight.cached_data[Ci * k * k * (j * C + q) + (i * C + m) * k * k + n];
+                  }
+                }
+              }
+              int shift = perm_inv[p][q];
+              bool sign = flip[p][perm_inv[p][q]];
+              for (int m = 0; m < ct_info.N; m++) {
+                tmp_shift[m] = tmp_orig[(m + shift) % ct_info.N];
+                if ((m + shift >= ct_info.N) ^ sign) {
+                  tmp_shift[m] *= -1;
+                }
+              }
+              for (int m = 0; m < ct_info.N; m++) {
+                s_w_msg[m] += tmp_shift[perm_inv[p % inrot][m]] * (1 - 2 * flip[p % inrot][perm_inv[p % inrot][m]]);
               }
             }
+            for (int q = 0; q < ct_info.N; q++) {
+              if (s_w_msg[q] < 0) {
+                w_msg[q] = ct_info.prime_mod + s_w_msg[q];
+              }
+              else {
+                w_msg[q] = s_w_msg[q];
+              }
+            }
+            weight_pt.push_back(ct_info.context_p->encode_coeffs_mul(w_msg, ct_info.level));
           }
-          weight_pt.push_back(ct_info.context_p->encode_coeffs_mul(w_msg, ct_info.level));
         }
       }
     }
@@ -514,8 +561,13 @@ class Conv2dChan : public Module<Data> {
         if (i * C + j < Ci){
           for (int m = 0; m < H; m++){
             for (int n = 0; n < W; n++){
-              if (m >= p && m < p + Hi && n >= p && n < p + Wi){
-                ac_msg[C * (m * W + n) + j] = act.cached_data[(i * C + j) * Hi * Wi + (m - p) * Wi + (n - p)];
+              if (m >= p && m < p + Hi && n >= p && n < p + Wi) {
+                if (C * (m * W + n) + j + 1 >= ct_info.N) {
+                  ac_msg[C * (m * W + n) + j + 1 - ct_info.N] = -act.cached_data[(i * C + j) * Hi * Wi + (m - p) * Wi + (n - p)];
+                }
+                else {
+                  ac_msg[C * (m * W + n) + j + 1] = act.cached_data[(i * C + j) * Hi * Wi + (m - p) * Wi + (n - p)];
+                }
               }
             }
           }
@@ -532,8 +584,13 @@ class Conv2dChan : public Module<Data> {
     for (int i = 0; i < Co; i++){
       for (int j = 0; j < Ho; j++){
         for (int l = 0; l < Wo; l++){
-          int ofs = (k * W + k - W) * C - 1;
-          out.cached_data[i * Ho * Wo + j * Wo + l] = out_msg[i][ofs + C * s * (j * W + l)];
+          int ofs = (k * W + k - W) * C;
+          if (ofs + C * s * (j * W + l) + (Co - 1 - i) % C >= ct_info.N) {
+            out.cached_data[i * Ho * Wo + j * Wo + l] = -out_msg[(Co - 1 - i) / C][ofs + C * s * (j * W + l - 1) + (Co - 1 - i) % C - ct_info.N]; // why?
+          }
+          else {
+            out.cached_data[i * Ho * Wo + j * Wo + l] = out_msg[(Co - 1 - i) / C][ofs + C * s * (j * W + l - 1) + (Co - 1 - i) % C];
+          }
         }
       }
     }
@@ -553,7 +610,10 @@ class Conv2dChan : public Module<Data> {
     vector<BfvCiphertext> out_ct;
     vector<BfvPlaintext> out_share;
     vector<vector<Data>> out_msg;
-
+    io->sync();
+#ifdef LOG_LAYERWISE
+    auto acpacktimestart = TIMER_TILL_NOW;
+#endif
     if (party == sci::ALICE){
       ac_msg = pack_ac(input);
       for (int i = 0; i < ac_msg.size(); i++) {
@@ -578,30 +638,120 @@ class Conv2dChan : public Module<Data> {
         io->send_data(static_cast<void*>(ac_ct[i].serialize(param).data()), ct_info.cipher_size);
       }
     }
+  io->sync();
 #ifdef LOG_LAYERWISE
-    auto temp1 = TIMER_TILL_NOW;
+    auto acpacktimeend = TIMER_TILL_NOW;
+    Conv2dpackingacInMilliSec +=
+        (acpacktimeend - acpacktimestart);
+    std::cout << " Input packing takes: "
+              << (acpacktimeend - acpacktimestart) / 1000.0
+              << " s" << std::endl;
+#endif
+#ifdef LOG_LAYERWISE
+ auto kernelcomputationstart= TIMER_TILL_NOW;
 #endif
     if (party == sci::ALICE){
+      // using FPGA to compute
+      // vector<BfvPlaintextRingt> r_pt;
+      // for (int i = 1; i < C; i *= 2) {
+      //   vector<uint64_t> r(ct_info.N, 0);
+      //   r[i] = 1;
+      //   r_pt.push_back(ct_info.context_p->encode_coeffs_ringt(r));
+      // }
+      // for (int i = 0; i < c_o; i++){
+      //   out_ct.push_back(std::move(ct_info.context_p->new_ciphertext(1, ct_info.level)));
+      // }
+      // FpgaDevice::init();
+      // FpgaProject fpga_project("../../channel_fpga/channel_0");
+      // vector<CxxVectorArgument> cxx_args = {{"w", &weight_pt}, {"ac", &ac_ct}, {"r", &r_pt}, {"y", &out_ct} };
+      // fpga_project.run(ct_info.context_p, cxx_args, true);
+
+      // using FPGA to compute, with coeff BSGS
+      // for (int i = 0; i < c_o; i++){
+      //   out_ct.push_back(std::move(ct_info.context_p->new_ciphertext(1, ct_info.level)));
+      // }
+      // FpgaDevice::init();
+      // FpgaProject fpga_project("../../channel_fpga/channel_bsgs_0");
+      // vector<CxxVectorArgument> cxx_args = {{"w", &weight_pt}, {"ac", &ac_ct}, {"y", &out_ct} };
+      // fpga_project.run(ct_info.context_p, cxx_args, true);
+
+      // using CPU to compute
       for (int i = 0; i < c_i; i++) {
         for (int j = 0; j < Co; j++) {
           out_ct.push_back(ct_info.context_p->mult_plain_mul(ac_ct[i], weight_pt[i * Co + j]));
         }
       }
+      std::cout << "1" << std::endl;
       for (int i = 1; i < c_i; i++) {
         for (int j = 0; j < Co; j++) {
           ct_info.context_p->add_inplace(out_ct[j], out_ct[i * Co + j]);
         }
       }
-    }
+      std::cout << "2" << std::endl;
+
+      // w/o log2
+      // for (int i = 0; i < Co; i++) {
+      //   for (int j = 1; j < C; j *= 2) {
+      //     BfvCiphertext tmp = ct_info.context_p->rotate(out_ct[i], automap[j][0]);
+      //     for (int l = 1; l < automap[j].size(); l++) {
+      //       tmp = ct_info.context_p->rotate(tmp, automap[j][l]);
+      //     }
+      //     ct_info.context_p->add_inplace(out_ct[i], tmp);
+      //   }
+      // }
+      // for (int i = 1; i < C; i++) {
+      //   vector<uint64_t> r(ct_info.N, 0);
+      //   r[i] = 1;
+      //   BfvPlaintextMul rshift = ct_info.context_p->encode_coeffs_mul(r, ct_info.level);
+      //   for (int j = i; j < Co; j += C) {
+      //     out_ct[j] = ct_info.context_p->mult_plain_mul(out_ct[j], rshift);
+      //     ct_info.context_p->add_inplace(out_ct[j - j % C], out_ct[j]);
+      //   }
+      // }
+
+      // w/ log2
+      for (int i = C / 2; i >= 1; i /= 2) {
+        vector<uint64_t> r(ct_info.N, 0);
+        r[i] = 1;
+        BfvPlaintextMul rshift = ct_info.context_p->encode_coeffs_mul(r, ct_info.level);
+        for (int j = 0; j < c_o; j++) {
+          for (int m = 0; m < i; m++) {
+            BfvCiphertext tmp1 = ct_info.context_p->rotate(out_ct[j * C + m], automap[i][0]);
+            BfvCiphertext tmp2 = ct_info.context_p->rotate(out_ct[j * C + m + i], automap[i][0]);
+            for (int l = 1; l < automap[i].size(); l++) {
+              tmp1 = ct_info.context_p->rotate(tmp1, automap[i][l]);
+              tmp2 = ct_info.context_p->rotate(tmp2, automap[i][l]);
+            }
+            ct_info.context_p->add_inplace(out_ct[j * C + m], tmp1);
+            ct_info.context_p->add_inplace(out_ct[j * C + m + i], tmp2);
+            BfvCiphertext shifted_out_ct = ct_info.context_p->mult_plain_mul(out_ct[j * C + m + i], rshift);
+            ct_info.context_p->add_inplace(out_ct[j * C + m], shifted_out_ct);
+          }
+        }
+      }
 #ifdef LOG_LAYERWISE
-    auto temp2 = TIMER_TILL_NOW;
-    Conv2dCompTimeInMilliSec += (temp2 - temp1); // kept the variable name
+      auto kernelcomputationend = TIMER_TILL_NOW;
+      std::cout << "Time in sec for conv computation = "
+                << ((kernelcomputationend -
+                     kernelcomputationstart) /
+                    1000.0)
+                << std::endl;
+
+      Conv2dCompTimeInMilliSec +=
+          (kernelcomputationend - kernelcomputationstart);
 #endif
+    }
     std::random_device rd;
     std::mt19937_64 gen(rd());
     std::uniform_int_distribution<uint64_t> distrib(0, ct_info.prime_mod - 1);
+#ifdef LOG_LAYERWISE
+    auto maskstart = TIMER_TILL_NOW;
+#endif
     if (party == sci::ALICE){
-      for (int i = 0; i < Co; i++){
+#ifdef LOG_LAYERWISE
+    auto send_start = TIMER_TILL_NOW;
+#endif
+      for (int i = 0; i < c_o; i++){
         vector<uint64_t> pos_mask(ct_info.N, 0);
         vector<uint64_t> neg_mask(ct_info.N, 0);
         for(int j = 0; j < pos_mask.size(); j++) {
@@ -614,36 +764,54 @@ class Conv2dChan : public Module<Data> {
         out_share.push_back(move(temp_buffer_pos));
         io->send_data(static_cast<void*>(out_ct[i].serialize(param).data()), ct_info.cipher_size);
       }
+#ifdef LOG_LAYERWISE
+    auto send_end = TIMER_TILL_NOW;
+    Conv2dSendTimeInMilliSec += (send_end - send_start);
+    std::cout << "Time in sec for sending = "
+              << ((send_end - send_start) / 1000.0)
+              << std::endl;
+#endif
     }
     else {
-      for(int i = 0; i < Co; i++) {
+      for(int i = 0; i < c_o; i++) {
         vector<uint8_t> buffer(ct_info.cipher_size, 0);
         io->recv_data(static_cast<void*>(buffer.data()), ct_info.cipher_size);
         BfvCiphertext ct_buffer = BfvCiphertext::deserialize(&buffer);
         out_ct.push_back(move(ct_buffer));
       }
     }
-
+io->sync();
+#ifdef LOG_LAYERWISE
+    auto maskend = TIMER_TILL_NOW;
+    Conv2dMaskTimeInMilliSec += (maskend - maskstart);
+    std::cout << "Time in sec for mask = "
+              << ((maskend - maskstart) / 1000.0)
+              << std::endl;
+    auto decryptandunpackstart = TIMER_TILL_NOW;
+#endif
     if(party == sci::ALICE) {
-      for(int i = 0; i < Co; i++) {
+      for(int i = 0; i < c_o; i++) {
         vector<uint64_t> res = ct_info.context_p->decode_coeffs(out_share[i]);
         out_msg.push_back(res);
       }
     } else {
-      for(int i = 0; i < Co; i++) {
+      for(int i = 0; i < c_o; i++) {
         vector<uint64_t> res = ct_info.context_p->decode_coeffs(ct_info.context_p->decrypt(out_ct[i]));
         out_msg.push_back(res);
       }
     }
+    Tensor<Data> restensor = depack_res(out_msg);
 #ifdef LOG_LAYERWISE
-    auto temp = TIMER_TILL_NOW;
-    Conv2dCoeffTimeInMilliSec += temp;
-    std::cout << "Time in sec for current conv = " << (temp / 1000.0) << std::endl;
-    uint64_t curComm;
-    FIND_ALL_IO_TILL_NOW(curComm);
-    Conv2dCoeffCommSent += curComm;
+        auto decryptandunpackend = TIMER_TILL_NOW;
+        Conv2dDecryptUnpackInMilliSec +=
+            (decryptandunpackend - decryptandunpackstart);
+        std::cout << "Time in sec for decrypt and unpack = "
+                  << ((decryptandunpackend -
+                       decryptandunpackstart) /
+                      1000.0)
+                  << std::endl;
 #endif
-    return depack_res(out_msg);
+    return restensor;
   }
 };
 

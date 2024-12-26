@@ -288,7 +288,7 @@ class Conv2dCoeff : public Module<Data> {
         io->recv_data(static_cast<void*>(buffer.data()),
                       ct_info.cipher_size);
         BfvCiphertext ct_buffer =
-            BfvCiphertext::deserialize(&buffer);
+            BfvCiphertext::deserialize(buffer);
         ac_ct.push_back(move(ct_buffer));
       }
       for(int i = 0; i < ac_msg.size(); i++) {
@@ -396,7 +396,7 @@ class Conv2dCoeff : public Module<Data> {
             io->recv_data(static_cast<void*>(buffer.data()),
                           ct_info.cipher_size);
             BfvCiphertext ct_buffer =
-                BfvCiphertext::deserialize(&buffer);
+                BfvCiphertext::deserialize(buffer);
             out_ct_ls.push_back(move(ct_buffer));
           }
         }
@@ -622,7 +622,10 @@ class BoltMatmul : public Module<Data>{
     vector<BfvCiphertext> out_ct;
     vector<BfvPlaintext> out_share;
     vector<vector<Data>> out_msg;
-    
+    io->sync();
+#ifdef LOG_LAYERWISE
+    auto acpacktimestart = TIMER_TILL_NOW;
+#endif      
     if (party == sci::ALICE){
       // Combine the mask
       ac_msg = pack_ac(input);
@@ -632,7 +635,7 @@ class BoltMatmul : public Module<Data>{
       for (int i = 0; i < ac_msg.size(); i++) {
         vector<uint8_t> buffer(ct_info.cipher_size, 0);
         io->recv_data(static_cast<void*>(buffer.data()), ct_info.cipher_size);
-        BfvCiphertext ct_buffer = BfvCiphertext::deserialize(&buffer);
+        BfvCiphertext ct_buffer = BfvCiphertext::deserialize(buffer);
         ac_ct.push_back(move(ct_buffer));
       }
       for (int i = 0; i < ac_msg.size(); i++) {
@@ -648,14 +651,23 @@ class BoltMatmul : public Module<Data>{
         io->send_data(static_cast<void*>(ac_ct[i].serialize(param).data()), ct_info.cipher_size);
       }
     }
+  io->sync();
 #ifdef LOG_LAYERWISE
-    auto temp1 = TIMER_TILL_NOW;
+    auto acpacktimeend = TIMER_TILL_NOW;
+    Conv2dpackingacInMilliSec +=
+        (acpacktimeend - acpacktimestart);
+    std::cout << " Input packing takes: "
+              << (acpacktimeend - acpacktimestart) / 1000.0
+              << " s" << std::endl;
+#endif
+#ifdef LOG_LAYERWISE
+ auto kernelcomputationstart= TIMER_TILL_NOW;
 #endif
     if (party == sci::ALICE){
       //perform rotations
       for (int i = 0; i < input_rot - 1; i++){
         for (int j = 0; j < d1 / t; j++){
-          ac_ct.push_back(ct_info.context_p->rotate(ac_ct[i * (d1 / t) + j], d0 / 2));
+          ac_ct.push_back(ct_info.context_p->rotate_cols(ac_ct[i * (d1 / t) + j], d0 / 2));
         }
       }
       for (int i = 0; i < weight_pt.size(); i++){
@@ -675,18 +687,28 @@ class BoltMatmul : public Module<Data>{
         }
         out_ct.push_back(move(int_ct[i * t]));
         for (int j = input_rot; j < t; j += input_rot){
-          out_ct[i] = ct_info.context_p->rotate(out_ct[i], d0 * input_rot / 2);
+          out_ct[i] = ct_info.context_p->rotate_cols(out_ct[i], d0 * input_rot / 2);
           ct_info.context_p->add_inplace(out_ct[i], int_ct[i * t + j]);
         }
       }
     }
 #ifdef LOG_LAYERWISE
-    auto temp2 = TIMER_TILL_NOW;
-    Conv2dCompTimeInMilliSec += (temp2 - temp1); // kept the variable name
+      auto kernelcomputationend = TIMER_TILL_NOW;
+      std::cout << "Time in sec for conv computation = "
+                << ((kernelcomputationend -
+                     kernelcomputationstart) /
+                    1000.0)
+                << std::endl;
+
+      Conv2dCompTimeInMilliSec +=
+          (kernelcomputationend - kernelcomputationstart);
 #endif
     std::random_device rd;
     std::mt19937_64 gen(rd());
     std::uniform_int_distribution<uint64_t> distrib(0, ct_info.prime_mod - 1);
+#ifdef LOG_LAYERWISE
+    auto maskstart = TIMER_TILL_NOW;
+#endif      
     if (party == sci::ALICE){
       for (int i = 0; i < d2 / t; i++){
         vector<uint64_t> pos_mask(ct_info.N, 0);
@@ -706,11 +728,19 @@ class BoltMatmul : public Module<Data>{
       for(int i = 0; i < d2 / t; i++) {
         vector<uint8_t> buffer(ct_info.cipher_size, 0);
         io->recv_data(static_cast<void*>(buffer.data()), ct_info.cipher_size);
-        BfvCiphertext ct_buffer = BfvCiphertext::deserialize(&buffer);
+        BfvCiphertext ct_buffer = BfvCiphertext::deserialize(buffer);
         out_ct.push_back(move(ct_buffer));
       }
     }
-
+io->sync();
+#ifdef LOG_LAYERWISE
+    auto maskend = TIMER_TILL_NOW;
+    Conv2dMaskTimeInMilliSec += (maskend - maskstart);
+    std::cout << "Time in sec for mask = "
+              << ((maskend - maskstart) / 1000.0)
+              << std::endl;
+    auto decryptandunpackstart = TIMER_TILL_NOW;
+#endif
     if(party == sci::ALICE) {
       for(int i = 0; i < d2 / t; i++) {
         vector<uint64_t> res = ct_info.context_p->decode(out_share[i]);
@@ -722,15 +752,18 @@ class BoltMatmul : public Module<Data>{
         out_msg.push_back(res);
       }
     }
+    Tensor<Data> restensor = depack_res(out_msg);
 #ifdef LOG_LAYERWISE
-    auto temp = TIMER_TILL_NOW;
-    Conv2dCoeffTimeInMilliSec += temp;
-    std::cout << "Time in sec for current matmul = " << (temp / 1000.0) << std::endl;
-    uint64_t curComm;
-    FIND_ALL_IO_TILL_NOW(curComm);
-    Conv2dCoeffCommSent += curComm;
+        auto decryptandunpackend = TIMER_TILL_NOW;
+        Conv2dDecryptUnpackInMilliSec +=
+            (decryptandunpackend - decryptandunpackstart);
+        std::cout << "Time in sec for decrypt and unpack = "
+                  << ((decryptandunpackend -
+                       decryptandunpackstart) /
+                      1000.0)
+                  << std::endl;
 #endif
-    return depack_res(out_msg);
+    return restensor;
   }
 };
 
